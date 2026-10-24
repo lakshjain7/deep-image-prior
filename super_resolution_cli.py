@@ -105,6 +105,13 @@ def parse_args():
         help="Enable Weights & Biases logging",
     )
     parser.add_argument(
+        "--kernel-type",
+        type=str,
+        choices=["lanczos2", "lanczos3"],
+        default="lanczos2",
+        help="Downsampling kernel used during optimization",
+    )
+    parser.add_argument(
         "--wandb-project",
         type=str,
         default="deep-image-prior",
@@ -167,6 +174,7 @@ def main():
                             "reg_noise_std": reg_noise_std,
                             "tv_weight": args.tv_weight,
                             "device": device,
+                            "kernel_type": args.kernel_type,
                         },
                     )
             print("[*] Initialized Weights & Biases logging.")
@@ -187,7 +195,7 @@ def main():
     INPUT = "noise"
     pad = "reflection"
     OPT_OVER = "net"
-    KERNEL_TYPE = "lanczos2"
+    KERNEL_TYPE = args.kernel_type
     OPTIMIZER = "adam"
 
     net_input = get_noise(input_depth, INPUT, (imgs["HR_pil"].size[1], imgs["HR_pil"].size[0])).type(dtype).detach()
