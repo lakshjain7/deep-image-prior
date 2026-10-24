@@ -6,6 +6,7 @@ Refactored CLI script with support for CPU/CUDA fallback, automated logging, and
 
 import argparse
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -117,6 +118,12 @@ def parse_args():
         default="deep-image-prior",
         help="Weights & Biases project name",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible runs (default: None)",
+    )
     return parser.parse_args()
 
 
@@ -137,11 +144,28 @@ def resolve_device(device_arg: str):
 
 def main():
     args = parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
+        # Improve repeatability for supported operations.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        print(f"[*] Random seed: {args.seed}")
+    else:
+        # Preserve the existing default behavior.
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
+
     device, dtype = resolve_device(args.device)
 
     if device == "cuda":
         torch.backends.cudnn.enabled = True
-        torch.backends.cudnn.benchmark = True
 
     # Setup directories
     output_path = Path(args.output_dir)
