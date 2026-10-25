@@ -113,6 +113,13 @@ def parse_args():
         help="Downsampling kernel used during optimization",
     )
     parser.add_argument(
+        "--loss",
+        type=str,
+        choices=["mse", "l1", "l1-em", "m-l1"],
+        default="mse",
+        help="Fidelity loss: MSE, L1, ensemble-mean L1, or mean multi-kernel L1",
+    )
+    parser.add_argument(
         "--wandb-project",
         type=str,
         default="deep-image-prior",
@@ -199,6 +206,7 @@ def main():
                             "tv_weight": args.tv_weight,
                             "device": device,
                             "kernel_type": args.kernel_type,
+                            "loss": args.loss,
                         },
                     )
             print("[*] Initialized Weights & Biases logging.")
@@ -238,6 +246,20 @@ def main():
     img_LR_var = np_to_torch(imgs["LR_np"]).type(dtype)
     downsampler = Downsampler(n_planes=3, factor=args.factor, kernel_type=KERNEL_TYPE, phase=0.5, preserve_size=True).type(dtype)
 
+    # Additional operators used only by the multi-kernel loss formulations.
+    downsampler_l2 = None
+    downsampler_l3 = None
+    if args.loss in ("l1-em", "m-l1"):
+        downsampler_l2 = Downsampler(
+            n_planes=3, factor=args.factor, kernel_type="lanczos2",
+            phase=0.5, preserve_size=True
+        ).type(dtype)
+        downsampler_l3 = Downsampler(
+            n_planes=3, factor=args.factor, kernel_type="lanczos3",
+            phase=0.5, preserve_size=True
+        ).type(dtype)
+
+
     # 3. Optimization Setup
     net_input_saved = net_input.detach().clone()
     noise = net_input.detach().clone()
@@ -255,7 +277,29 @@ def main():
         out_HR = net(net_input)
         out_LR = downsampler(out_HR)
 
-        total_loss = mse(out_LR, img_LR_var)
+        if args.loss == "mse":
+            total_loss = mse(out_LR, img_LR_var)
+
+        elif args.loss == "l1":
+            total_loss = torch.nn.functional.l1_loss(out_LR, img_LR_var)
+
+        elif args.loss == "l1-em":
+            # L1 against the mean prediction from Lanczos-2 and Lanczos-3.
+            pred_l2 = downsampler_l2(out_HR)
+            pred_l3 = downsampler_l3(out_HR)
+            pred_mean = (pred_l2 + pred_l3) / 2.0
+            total_loss = torch.nn.functional.l1_loss(
+                pred_mean, img_LR_var
+            )
+
+        elif args.loss == "m-l1":
+            # Mean of the individual L1 losses, not L1 of the mean prediction.
+            pred_l2 = downsampler_l2(out_HR)
+            pred_l3 = downsampler_l3(out_HR)
+            loss_l2 = torch.nn.functional.l1_loss(pred_l2, img_LR_var)
+            loss_l3 = torch.nn.functional.l1_loss(pred_l3, img_LR_var)
+            total_loss = (loss_l2 + loss_l3) / 2.0
+
         if args.tv_weight > 0:
             total_loss += args.tv_weight * tv_loss(out_HR)
 
