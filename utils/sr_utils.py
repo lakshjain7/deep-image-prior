@@ -15,7 +15,7 @@ def put_in_center(img_np, target_size):
     return img_out
 
 
-def load_LR_HR_imgs_sr(fname, imsize, factor, enforse_div32=None):
+def load_LR_HR_imgs_sr(fname, imsize, factor, enforse_div32=None, lr_method='pil-lanczos'):
     '''Loads an image, resizes it, center crops and downscales.
 
     Args: 
@@ -23,6 +23,9 @@ def load_LR_HR_imgs_sr(fname, imsize, factor, enforse_div32=None):
         imsize: new size for the image, -1 for no resizing
         factor: downscaling factor
         enforse_div32: if 'CROP' center crops an image, so that its dimensions are divisible by 32.
+        lr_method: 'pil-lanczos' (default, used for Stages 1-3 so far) or 'bicubic', which reproduces the
+            official dip-sisr main.py: F.interpolate(hr, scale_factor=1/factor, mode='bicubic', align_corners=False)
+            (no antialiasing, no clipping of the LR array).
     '''
     img_orig_pil, img_orig_np = get_image(fname, -1)
 
@@ -51,9 +54,18 @@ def load_LR_HR_imgs_sr(fname, imsize, factor, enforse_div32=None):
                img_HR_pil.size[1] // factor
     ]
 
-    img_LR_pil = img_HR_pil.resize(LR_size, Image.Resampling.LANCZOS)
-    # img_LR_pil = img_HR_pil.resize(LR_size, Image.ANTIALIAS)
-    img_LR_np = pil_to_np(img_LR_pil)
+    if lr_method == 'pil-lanczos':
+        img_LR_pil = img_HR_pil.resize(LR_size, Image.Resampling.LANCZOS)
+        # img_LR_pil = img_HR_pil.resize(LR_size, Image.ANTIALIAS)
+        img_LR_np = pil_to_np(img_LR_pil)
+    elif lr_method == 'bicubic':
+        hr_t = torch.from_numpy(img_HR_np).float()[None]
+        img_LR_np = torch.nn.functional.interpolate(
+            hr_t, scale_factor=1 / factor, mode='bicubic', align_corners=False)[0].numpy()
+        assert img_LR_np.shape[1:] == (LR_size[1], LR_size[0]), (img_LR_np.shape, LR_size)
+        img_LR_pil = np_to_pil(np.clip(img_LR_np, 0, 1))  # only used for the bicubic/nearest baselines
+    else:
+        raise ValueError(f"Unknown lr_method {lr_method!r}")
 
     print('HR and LR resolutions: %s, %s' % (str(img_HR_pil.size), str (img_LR_pil.size)))
 

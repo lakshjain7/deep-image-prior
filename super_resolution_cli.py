@@ -152,6 +152,14 @@ def parse_args():
     parser.add_argument("--ssah-mu", type=float, default=OFFICIAL_DEFAULTS["ssah_mu"], help="mu of SSAHTV")
     parser.add_argument("--bd-alpha", type=float, default=OFFICIAL_DEFAULTS["bd_alpha"], help="alpha of the BD term")
     parser.add_argument("--bd-beta", type=float, default=OFFICIAL_DEFAULTS["bd_beta"], help="beta of the BD term")
+    parser.add_argument(
+        "--lr-method",
+        type=str,
+        choices=["pil-lanczos", "bicubic"],
+        default="pil-lanczos",
+        help="How the LR observation is generated from HR: PIL Lanczos (default, Stages 1-3) or the official "
+             "dip-sisr bicubic F.interpolate",
+    )
     parser.add_argument("--wandb-run-name", type=str, default=None, help="W&B run name")
     parser.add_argument("--wandb-run-id", type=str, default=None, help="Explicit W&B run id")
     parser.add_argument("--wandb-group", type=str, default=None, help="W&B group")
@@ -292,6 +300,7 @@ def main():
         "bd_alpha": args.bd_alpha,
         "bd_beta": args.bd_beta,
         "optimizer": "adam",
+        "lr_method": args.lr_method,
         **git_info(),
         **env_info(device),
         **json.loads(args.extra_config_json),
@@ -340,7 +349,8 @@ def run(args, config, device, dtype, num_iter, reg_noise_std, output_path, wb_ru
 
     # 1. Load images and baselines
     print(f"[*] Loading input image: {args.img_path}")
-    imgs = load_LR_HR_imgs_sr(args.img_path, imsize=-1, factor=args.factor, enforse_div32="CROP")
+    imgs = load_LR_HR_imgs_sr(args.img_path, imsize=-1, factor=args.factor, enforse_div32="CROP",
+                              lr_method=args.lr_method)
     imgs["bicubic_np"], imgs["sharp_np"], imgs["nearest_np"] = get_baselines(imgs["LR_pil"], imgs["HR_pil"])
 
     psnr_bicubic = compare_psnr(imgs["HR_np"], imgs["bicubic_np"])
