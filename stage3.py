@@ -36,12 +36,13 @@ PROTOCOLS = {
                       "from the official code, so not an exact reproduction."},
 }
 
-# Regularizer weights. Only 'tvssah' (0.8) and the BD alpha/beta come from the official code defaults
-# (dip-sisr main.py argparse). The TV / NN / BD weights are NOT given by the official code (defaults 0)
-# and could not be read from the paper in this session: they are ASSUMED, scale-matched starting values.
-DEFAULT_REG_WEIGHTS = {"none": 0.0, "tv": 0.05, "nn": 1.0, "tvssah": 0.8, "bd": 0.05}
-WEIGHT_PROVENANCE = {"none": "-", "tv": "ASSUMED", "nn": "ASSUMED", "tvssah": "official default (main.py)",
-                     "bd": "ASSUMED (alpha=2.8, beta=0.35 are official defaults)"}
+# Regularizer weights: Table 3 of Abalo-Garcia et al. (2025), Set5 row (lambda_TV 0.5, lambda_NN 6, lambda_SSAH 1,
+# lambda_BD 0.3); alpha=2.8, beta=0.35 from Sec. 6.2.2. They were tuned by the authors for THEIR protocol
+# (lr 0.001, noise 0.01, 5500 it, bicubic LR), so under the "adapted" protocol they are paper values, not tuned ones.
+# Caveat: the paper's formulas are un-normalised sums; we use the official code's normalised versions (mean / omega).
+DEFAULT_REG_WEIGHTS = {"none": 0.0, "tv": 0.5, "nn": 6.0, "tvssah": 1.0, "bd": 0.3}
+WEIGHT_PROVENANCE = {"none": "-", "tv": "paper Table 3 (Set5)", "nn": "paper Table 3 (Set5)",
+                     "tvssah": "paper Table 3 (Set5)", "bd": "paper Table 3 (Set5); alpha=2.8, beta=0.35 (Sec. 6.2.2)"}
 
 
 def run_key(image, loss, reg, seed, protocol, weight):
