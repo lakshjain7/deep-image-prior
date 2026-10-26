@@ -45,13 +45,17 @@ WEIGHT_PROVENANCE = {"none": "-", "tv": "paper Table 3 (Set5)", "nn": "paper Tab
                      "tvssah": "paper Table 3 (Set5)", "bd": "paper Table 3 (Set5); alpha=2.8, beta=0.35 (Sec. 6.2.2)"}
 
 
-def run_key(image, loss, reg, seed, protocol, weight, lr_method="pil-lanczos"):
+def run_key(image, loss, reg, seed, protocol, weight, lr_method="pil-lanczos", kernel="lanczos2"):
     key = f"{image}__{loss}__{reg}-{weight:g}__seed{seed}__{protocol}"
-    # The default keeps the keys of the runs already recorded in W&B unchanged.
-    return key if lr_method == "pil-lanczos" else f"{key}__{lr_method}"
+    # Defaults keep the keys of the runs already recorded in W&B unchanged.
+    if lr_method != "pil-lanczos":
+        key += f"__{lr_method}"
+    if kernel != "lanczos2":
+        key += f"__{kernel}"
+    return key
 
 
-def build_jobs(images, losses, regs, seeds, protocol, reg_weights, lr_method="pil-lanczos"):
+def build_jobs(images, losses, regs, seeds, protocol, reg_weights, lr_method="pil-lanczos", kernel="lanczos2"):
     jobs = []
     for seed in seeds:
         for reg in regs:
@@ -59,8 +63,8 @@ def build_jobs(images, losses, regs, seeds, protocol, reg_weights, lr_method="pi
                 for loss in losses:
                     w = float(reg_weights[reg])
                     jobs.append({"image": image, "loss": loss, "reg": reg, "weight": w, "seed": seed,
-                                 "protocol": protocol, "lr_method": lr_method,
-                                 "key": run_key(image, loss, reg, seed, protocol, w, lr_method)})
+                                 "protocol": protocol, "lr_method": lr_method, "kernel": kernel,
+                                 "key": run_key(image, loss, reg, seed, protocol, w, lr_method, kernel)})
     # Unregularised baselines first: they make every later row interpretable even if the session ends early.
     jobs.sort(key=lambda j: (j["reg"] != "none", j["seed"]))
     return jobs
@@ -149,20 +153,20 @@ def cli_command(job, cfg, img_path, attempt, tracker):
         "scale": cfg["factor"], "fidelity_loss": job["loss"],
         "observation_operator": ("PIL Lanczos (a=3) downsampling of the HR image" if job["lr_method"] == "pil-lanczos"
                                  else "bicubic F.interpolate (official dip-sisr)"),
-        "forward_operator": "lanczos2 for l1; lanczos2+lanczos3 for l1-em / m-l1",
+        "forward_operator": (f"{job.get('kernel', 'lanczos2')} for l1" if job["loss"] == "l1" else "lanczos2+lanczos3 (l1-em / m-l1)"),
         "reg_weight_provenance": WEIGHT_PROVENANCE[job["reg"]],
     }
     cmd = [sys.executable, "-u", str(REPO_DIR / "super_resolution_cli.py"),
            "--img-path", str(img_path), "--factor", str(cfg["factor"]),
            "--num-iter", str(cfg["num_iter"]), "--lr", str(cfg["lr"]),
            "--reg-noise-std", str(cfg["reg_noise_std"]), "--seed", str(job["seed"]),
-           "--loss", job["loss"], "--kernel-type", "lanczos2", "--lr-method", job["lr_method"],
+           "--loss", job["loss"], "--kernel-type", job.get("kernel", "lanczos2"), "--lr-method", job["lr_method"],
            "--regularizer", job["reg"], "--reg-weight", str(job["weight"]),
            "--log-freq", str(cfg["log_freq"]), "--device", cfg.get("device", "auto"),
            "--output-dir", str(out), "--wandb", "--wandb-entity", tracker.entity or "",
            "--wandb-project", tracker.project,
            "--wandb-run-name", f"{cfg.get('name_prefix', 's3')}_{job['image']}_{job['loss']}_{job['reg']}_seed{job['seed']}",
-           "--wandb-group", f"stage3-{job['protocol']}-{job['lr_method']}", "--wandb-job-type", cfg.get("job_type", EXPERIMENT),
+           "--wandb-group", f"stage3-{job['protocol']}-{job['lr_method']}" + ("" if job.get("kernel", "lanczos2") == "lanczos2" else f"-{job['kernel']}"), "--wandb-job-type", cfg.get("job_type", EXPERIMENT),
            "--wandb-tags", ",".join(cfg.get("tags", []) + ["stage3", f"loss:{job['loss']}", f"reg:{job['reg']}",
                                                              f"img:{job['image']}", f"seed:{job['seed']}"]),
            "--extra-config-json", json.dumps(extra)]
@@ -200,7 +204,7 @@ def collect_results(jobs, tracker):
     """One row per planned configuration: best completed run, or the reason it is missing/failed."""
     rows = []
     for job in jobs:
-        row = {k: job[k] for k in ("key", "image", "loss", "reg", "weight", "seed", "protocol", "lr_method")}
+        row = {k: job[k] for k in ("key", "image", "loss", "reg", "weight", "seed", "protocol", "lr_method", "kernel")}
         if tracker.offline:
             if tracker.local_complete(job["key"]):
                 m = json.loads((tracker.run_dir(job["key"]) / "metrics.json").read_text())
