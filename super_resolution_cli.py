@@ -353,8 +353,8 @@ def run(args, config, device, dtype, num_iter, reg_noise_std, output_path, wb_ru
                               lr_method=args.lr_method)
     imgs["bicubic_np"], imgs["sharp_np"], imgs["nearest_np"] = get_baselines(imgs["LR_pil"], imgs["HR_pil"])
 
-    psnr_bicubic = compare_psnr(imgs["HR_np"], imgs["bicubic_np"])
-    psnr_nearest = compare_psnr(imgs["HR_np"], imgs["nearest_np"])
+    psnr_bicubic = compare_psnr(imgs["HR_np"], imgs["bicubic_np"], data_range=1.0)
+    psnr_nearest = compare_psnr(imgs["HR_np"], imgs["nearest_np"], data_range=1.0)
     print(f"[*] Baseline PSNR - Bicubic: {psnr_bicubic:.4f} dB | Nearest: {psnr_nearest:.4f} dB")
 
     # 2. Build model and input noise tensor
@@ -449,8 +449,8 @@ def run(args, config, device, dtype, num_iter, reg_noise_std, output_path, wb_ru
         out_HR_np = np.clip(torch_to_np(out_HR), 0, 1)
         out_LR_np = np.clip(torch_to_np(out_LR), 0, 1)
 
-        psnr_LR = compare_psnr(imgs["LR_np"], out_LR_np)
-        psnr_HR = compare_psnr(imgs["HR_np"], out_HR_np)
+        psnr_LR = compare_psnr(imgs["LR_np"], out_LR_np, data_range=1.0)
+        psnr_HR = compare_psnr(imgs["HR_np"], out_HR_np, data_range=1.0)
         psnr_history.append((i, psnr_LR, psnr_HR, total_loss.item(), fidelity.item(), reg.item()))
 
         # Live terminal progress
