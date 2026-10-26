@@ -5,9 +5,14 @@ Refactored CLI script with support for CPU/CUDA fallback, automated logging, and
 """
 
 import argparse
+import json
 import os
+import platform
 import random
+import subprocess
 import sys
+import time
+import traceback
 from pathlib import Path
 
 import matplotlib
@@ -16,12 +21,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr
+from skimage.metrics import structural_similarity as compare_ssim
 
 import torch
 import torch.optim
 
 from models import get_net
 from models.downsampler import Downsampler
+from utils.regularizers import OFFICIAL_DEFAULTS, REGULARIZERS, regularization_term
 from utils.sr_utils import (
     get_baselines,
     get_noise,
@@ -42,7 +49,7 @@ def parse_args():
     "--wandb-entity",
     type=str,
     default="deepimageprior",
-    help="Weights & Biases team/entity name",
+    help="Weights & Biases team/entity name (pass an empty string to use your default entity)",
     )
     parser.add_argument(
         "--img-path",
@@ -131,7 +138,80 @@ def parse_args():
         default=None,
         help="Random seed for reproducible runs (default: None)",
     )
+    parser.add_argument(
+        "--regularizer",
+        type=str,
+        choices=list(REGULARIZERS),
+        default="none",
+        help="Paper regularizer (ported from capo-urjc/dip-sisr): none, tv, nn (nuclear norm), "
+             "tvssah (SSAHTV), bd (Schiavi backward-diffusion term). Independent of the legacy --tv-weight.",
+    )
+    parser.add_argument("--reg-weight", type=float, default=0.0, help="Weight of --regularizer")
+    parser.add_argument("--p-tv", type=float, default=OFFICIAL_DEFAULTS["p_tv"], help="p of the TV norm")
+    parser.add_argument("--p-nn", type=float, default=OFFICIAL_DEFAULTS["p_nn"], help="p of the Schatten norm")
+    parser.add_argument("--ssah-mu", type=float, default=OFFICIAL_DEFAULTS["ssah_mu"], help="mu of SSAHTV")
+    parser.add_argument("--bd-alpha", type=float, default=OFFICIAL_DEFAULTS["bd_alpha"], help="alpha of the BD term")
+    parser.add_argument("--bd-beta", type=float, default=OFFICIAL_DEFAULTS["bd_beta"], help="beta of the BD term")
+    parser.add_argument("--wandb-run-name", type=str, default=None, help="W&B run name")
+    parser.add_argument("--wandb-run-id", type=str, default=None, help="Explicit W&B run id")
+    parser.add_argument("--wandb-group", type=str, default=None, help="W&B group")
+    parser.add_argument("--wandb-job-type", type=str, default=None, help="W&B job type")
+    parser.add_argument("--wandb-tags", type=str, default="", help="Comma-separated W&B tags")
+    parser.add_argument(
+        "--extra-config-json",
+        type=str,
+        default="{}",
+        help="JSON dict merged into the W&B config (stage name, run key, ...)",
+    )
     return parser.parse_args()
+
+
+def git_info():
+    here = Path(__file__).resolve().parent
+
+    def run(*cmd):
+        try:
+            return subprocess.run(cmd, cwd=here, capture_output=True, text=True, check=True).stdout.strip()
+        except Exception:
+            return None
+
+    return {
+        "git_commit": run("git", "rev-parse", "HEAD"),
+        "git_dirty": bool(run("git", "status", "--porcelain")),
+        "git_remote": run("git", "config", "--get", "remote.origin.url"),
+    }
+
+
+def env_info(device):
+    import skimage
+
+    info = {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "numpy": np.__version__,
+        "skimage": skimage.__version__,
+    }
+    if device == "cuda":
+        info["gpu"] = torch.cuda.get_device_name(0)
+    return info
+
+
+def final_metrics(hr_np, sr_np):
+    """Metrics of a final reconstruction against the (cropped) ground truth, both CHW float in [0, 1]."""
+    out = {
+        "psnr_hr": float(compare_psnr(hr_np, sr_np, data_range=1.0)),
+        "ssim_hr": float(compare_ssim(hr_np, sr_np, channel_axis=0, data_range=1.0)),
+    }
+    try:
+        # Y-channel PSNR with a 4 px border, same protocol as evaluate_set5.py.
+        from evaluate_set5 import calculate_psnr_y
+
+        gt_hwc, sr_hwc = hr_np.transpose(1, 2, 0), sr_np.transpose(1, 2, 0)
+        out["psnr_y_border4"] = float(calculate_psnr_y(gt_hwc[4:-4, 4:-4], sr_hwc[4:-4, 4:-4]))
+    except ImportError as e:
+        print(f"[Warning] Y-channel PSNR skipped: {e}")
+        out["psnr_y_border4"] = None
+    return out
 
 
 def resolve_device(device_arg: str):
@@ -151,6 +231,10 @@ def resolve_device(device_arg: str):
 
 def main():
     args = parse_args()
+    if args.regularizer != "none" and args.tv_weight > 0:
+        raise SystemExit("--tv-weight (legacy TV) cannot be combined with --regularizer; use one of them.")
+    if (args.regularizer == "none") != (args.reg_weight == 0):
+        raise SystemExit("--regularizer none requires --reg-weight 0, and a regularizer requires a non-zero weight.")
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -188,30 +272,71 @@ def main():
     else:
         raise ValueError(f"Unsupported factor: {args.factor}")
 
+    config = {
+        "image": args.img_path,
+        "image_name": Path(args.img_path).stem,
+        "factor": args.factor,
+        "num_iter": num_iter,
+        "lr": args.lr,
+        "reg_noise_std": reg_noise_std,
+        "tv_weight": args.tv_weight,
+        "device": device,
+        "kernel_type": args.kernel_type,
+        "loss": args.loss,
+        "seed": args.seed,
+        "regularizer": args.regularizer,
+        "reg_weight": args.reg_weight,
+        "p_tv": args.p_tv,
+        "p_nn": args.p_nn,
+        "ssah_mu": args.ssah_mu,
+        "bd_alpha": args.bd_alpha,
+        "bd_beta": args.bd_beta,
+        "optimizer": "adam",
+        **git_info(),
+        **env_info(device),
+        **json.loads(args.extra_config_json),
+    }
+
     # Optional W&B setup
     wb_run = None
+    wandb = None
     if args.wandb:
         try:
             import wandb
 
             wb_run = wandb.init(
-                        entity=args.wandb_entity,
-                        project=args.wandb_project,
-                        config={
-                            "image": args.img_path,
-                            "factor": args.factor,
-                            "num_iter": num_iter,
-                            "lr": args.lr,
-                            "reg_noise_std": reg_noise_std,
-                            "tv_weight": args.tv_weight,
-                            "device": device,
-                            "kernel_type": args.kernel_type,
-                            "loss": args.loss,
-                        },
-                    )
+                entity=args.wandb_entity or None,
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                id=args.wandb_run_id,
+                group=args.wandb_group,
+                job_type=args.wandb_job_type,
+                tags=[t for t in args.wandb_tags.split(",") if t],
+                config=config,
+                dir=str(output_path),
+            )
+            wb_run.define_metric("iteration")
+            wb_run.define_metric("*", step_metric="iteration")
             print("[*] Initialized Weights & Biases logging.")
         except ImportError:
             print("[Warning] wandb is not installed. Skipping wandb tracking. Run 'uv pip install wandb' to enable.")
+
+    try:
+        run(args, config, device, dtype, num_iter, reg_noise_std, output_path, wb_run, wandb)
+    except BaseException as exc:
+        (output_path / "error.json").write_text(json.dumps(
+            {"error": repr(exc), "traceback": traceback.format_exc(), "config": config}, indent=2, default=str))
+        if wb_run:
+            wb_run.summary["status"] = "failed"
+            wb_run.summary["error"] = repr(exc)
+            wb_run.finish(exit_code=1)
+        raise
+    if wb_run:
+        wb_run.finish()
+
+
+def run(args, config, device, dtype, num_iter, reg_noise_std, output_path, wb_run, wandb):
+    start_time = time.time()
 
     # 1. Load images and baselines
     print(f"[*] Loading input image: {args.img_path}")
@@ -278,17 +403,17 @@ def main():
         out_LR = downsampler(out_HR)
 
         if args.loss == "mse":
-            total_loss = mse(out_LR, img_LR_var)
+            fidelity = mse(out_LR, img_LR_var)
 
         elif args.loss == "l1":
-            total_loss = torch.nn.functional.l1_loss(out_LR, img_LR_var)
+            fidelity = torch.nn.functional.l1_loss(out_LR, img_LR_var)
 
         elif args.loss == "l1-em":
             # L1 against the mean prediction from Lanczos-2 and Lanczos-3.
             pred_l2 = downsampler_l2(out_HR)
             pred_l3 = downsampler_l3(out_HR)
             pred_mean = (pred_l2 + pred_l3) / 2.0
-            total_loss = torch.nn.functional.l1_loss(
+            fidelity = torch.nn.functional.l1_loss(
                 pred_mean, img_LR_var
             )
 
@@ -298,10 +423,15 @@ def main():
             pred_l3 = downsampler_l3(out_HR)
             loss_l2 = torch.nn.functional.l1_loss(pred_l2, img_LR_var)
             loss_l3 = torch.nn.functional.l1_loss(pred_l3, img_LR_var)
-            total_loss = (loss_l2 + loss_l3) / 2.0
+            fidelity = (loss_l2 + loss_l3) / 2.0
 
+        reg = regularization_term(
+            args.regularizer, out_HR, args.reg_weight, p_tv=args.p_tv, p_nn=args.p_nn,
+            ssah_mu=args.ssah_mu, bd_alpha=args.bd_alpha, bd_beta=args.bd_beta,
+        )
         if args.tv_weight > 0:
-            total_loss += args.tv_weight * tv_loss(out_HR)
+            reg = reg + args.tv_weight * tv_loss(out_HR)  # legacy TV (Stage 2 setting)
+        total_loss = fidelity + reg
 
         total_loss.backward()
 
@@ -311,11 +441,21 @@ def main():
 
         psnr_LR = compare_psnr(imgs["LR_np"], out_LR_np)
         psnr_HR = compare_psnr(imgs["HR_np"], out_HR_np)
-        psnr_history.append((i, psnr_LR, psnr_HR, total_loss.item()))
+        psnr_history.append((i, psnr_LR, psnr_HR, total_loss.item(), fidelity.item(), reg.item()))
 
         # Live terminal progress
         sys.stdout.write(f"\r[Iteration {i:05d}/{num_iter:05d}] Loss: {total_loss.item():.6f} | PSNR_LR: {psnr_LR:.2f} dB | PSNR_HR: {psnr_HR:.2f} dB")
         sys.stdout.flush()
+
+        if wb_run:
+            wb_run.log({
+                "iteration": i,
+                "loss": total_loss.item(),
+                "fidelity_loss": fidelity.item(),
+                "reg_loss": reg.item(),
+                "psnr_LR": psnr_LR,
+                "psnr_HR": psnr_HR,
+            })
 
         # Checkpoints & Previews
         if i % args.log_freq == 0 or i == num_iter - 1:
@@ -323,14 +463,7 @@ def main():
             Image.fromarray(preview_img).save(output_path / f"iter_{i:05d}.png")
 
             if wb_run:
-                import wandb
-                wb_run.log({
-                    "iteration": i,
-                    "loss": total_loss.item(),
-                    "psnr_LR": psnr_LR,
-                    "psnr_HR": psnr_HR,
-                    "reconstructed_HR": wandb.Image(preview_img),
-                })
+                wb_run.log({"iteration": i, "reconstructed_HR": wandb.Image(preview_img)})
 
         iteration_counter["i"] += 1
         return total_loss
@@ -345,21 +478,55 @@ def main():
         final_HR_np = np.clip(torch_to_np(net(net_input_saved)), 0, 1)
         final_deep_prior = put_in_center(final_HR_np, imgs["orig_np"].shape[1:])
 
-    final_psnr_hr = compare_psnr(imgs["HR_np"], final_HR_np)
-    print(f"[*] Final Super-Resolved Image PSNR: {final_psnr_hr:.4f} dB")
+    final = final_metrics(imgs["HR_np"], final_HR_np)
+    final_psnr_hr = final["psnr_hr"]
+    print(f"[*] Final Super-Resolved Image PSNR: {final_psnr_hr:.4f} dB | SSIM: {final['ssim_hr']:.4f}")
 
     final_img_arr = (final_HR_np.transpose(1, 2, 0) * 255).astype(np.uint8)
     final_output_file = output_path / f"final_sr_x{args.factor}.png"
     Image.fromarray(final_img_arr).save(final_output_file)
     print(f"[*] Saved final high-resolution image to: {final_output_file}")
 
-    # Save PSNR curve to CSV
+    # Save PSNR curve to CSV (first four columns keep the original schema)
     metrics_csv = output_path / "psnr_history.csv"
-    np.savetxt(metrics_csv, np.array(psnr_history), delimiter=",", header="iteration,psnr_lr,psnr_hr,loss", comments="")
+    np.savetxt(metrics_csv, np.array(psnr_history), delimiter=",",
+               header="iteration,psnr_lr,psnr_hr,loss,fidelity_loss,reg_loss", comments="")
     print(f"[*] Saved training metrics log to: {metrics_csv}")
 
+    hist = np.array(psnr_history)
+    summary = {
+        "status": "complete",
+        **final,
+        "last_iter_psnr_hr": float(hist[-1, 2]),  # noisy-input output at the last iteration (Stage 1 "last-recorded")
+        "best_iter_psnr_hr": float(hist[:, 2].max()),  # oracle, uses the ground truth; informational only
+        "best_iter": int(hist[hist[:, 2].argmax(), 0]),
+        "final_loss": float(hist[-1, 3]),
+        "final_fidelity_loss": float(hist[-1, 4]),
+        "final_reg_loss": float(hist[-1, 5]),
+        "psnr_bicubic_baseline": float(psnr_bicubic),
+        "psnr_nearest_baseline": float(psnr_nearest),
+        "runtime_seconds": round(time.time() - start_time, 1),
+    }
+
     if wb_run:
-        wb_run.finish()
+        def to_u8(arr):
+            return (arr.transpose(1, 2, 0) * 255).astype(np.uint8)
+
+        diff = np.clip(np.abs(imgs["HR_np"] - final_HR_np) * 10, 0, 1)
+        panel = np.concatenate([to_u8(imgs["bicubic_np"]), final_img_arr, to_u8(imgs["HR_np"]), to_u8(diff)], axis=1)
+        wb_run.log({
+            "final_reconstruction": wandb.Image(final_img_arr, caption=f"PSNR {final_psnr_hr:.2f} dB"),
+            "comparison": wandb.Image(panel, caption="bicubic | DIP SR | ground truth | |diff| x10"),
+        })
+        for key, value in summary.items():
+            wb_run.summary[key] = value
+        art = wandb.Artifact(f"result-{wb_run.id}", type="sr-result")
+        art.add_file(str(final_output_file))
+        art.add_file(str(metrics_csv))
+        wb_run.log_artifact(art)
+
+    # metrics.json is written last: its presence marks a locally complete run.
+    (output_path / "metrics.json").write_text(json.dumps({**summary, "config": config}, indent=2, default=str))
 
 
 if __name__ == "__main__":
