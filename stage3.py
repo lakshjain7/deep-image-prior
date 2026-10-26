@@ -114,9 +114,18 @@ class Tracker:
         """All W&B runs recorded for this configuration key (any state)."""
         if self.offline:
             return []
-        runs = self.api.runs(self.path, filters={"config.run_key": key})
+        runs = self._query(key)
         return [{"id": r.id, "name": r.name, "state": r.state, "status": r.summary.get("status"), "url": r.url}
                 for r in runs]
+
+    def _query(self, key):
+        """Runs for a key; a project that does not exist yet (first launch) simply has none."""
+        try:
+            return list(self.api.runs(self.path, filters={"config.run_key": key}))
+        except ValueError as e:
+            if "Could not find project" in str(e):
+                return []
+            raise
 
     def is_complete(self, key):
         if self.offline:
@@ -194,7 +203,7 @@ def collect_results(jobs, tracker):
             else:
                 row["status"] = "missing_or_failed"
         else:
-            runs = list(tracker.api.runs(tracker.path, filters={"config.run_key": job["key"]}))
+            runs = tracker._query(job["key"])
             done = [r for r in runs if r.state == "finished" and r.summary.get("status") == "complete"]
             if done:
                 r = max(done, key=lambda r: r.created_at)
