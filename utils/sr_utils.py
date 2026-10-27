@@ -25,7 +25,8 @@ def load_LR_HR_imgs_sr(fname, imsize, factor, enforse_div32=None, lr_method='pil
         enforse_div32: if 'CROP' center crops an image, so that its dimensions are divisible by 32.
         lr_method: 'pil-lanczos' (default, used for Stages 1-3 so far) or 'bicubic', which reproduces the
             official dip-sisr main.py: F.interpolate(hr, scale_factor=1/factor, mode='bicubic', align_corners=False)
-            (no antialiasing, no clipping of the LR array).
+            (no antialiasing, no clipping of the LR array). 'bicubic-aa' is the same call with antialias=True, i.e. the
+            usual benchmark-style bicubic low-pass + decimation.
     '''
     img_orig_pil, img_orig_np = get_image(fname, -1)
 
@@ -58,10 +59,11 @@ def load_LR_HR_imgs_sr(fname, imsize, factor, enforse_div32=None, lr_method='pil
         img_LR_pil = img_HR_pil.resize(LR_size, Image.Resampling.LANCZOS)
         # img_LR_pil = img_HR_pil.resize(LR_size, Image.ANTIALIAS)
         img_LR_np = pil_to_np(img_LR_pil)
-    elif lr_method == 'bicubic':
+    elif lr_method in ('bicubic', 'bicubic-aa'):
         hr_t = torch.from_numpy(img_HR_np).float()[None]
         img_LR_np = torch.nn.functional.interpolate(
-            hr_t, scale_factor=1 / factor, mode='bicubic', align_corners=False)[0].numpy()
+            hr_t, scale_factor=1 / factor, mode='bicubic', align_corners=False,
+            antialias=(lr_method == 'bicubic-aa'))[0].numpy()
         assert img_LR_np.shape[1:] == (LR_size[1], LR_size[0]), (img_LR_np.shape, LR_size)
         img_LR_pil = np_to_pil(np.clip(img_LR_np, 0, 1))  # only used for the bicubic/nearest baselines
     else:

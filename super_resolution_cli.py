@@ -155,7 +155,7 @@ def parse_args():
     parser.add_argument(
         "--lr-method",
         type=str,
-        choices=["pil-lanczos", "bicubic"],
+        choices=["pil-lanczos", "bicubic", "bicubic-aa"],
         default="pil-lanczos",
         help="How the LR observation is generated from HR: PIL Lanczos (default, Stages 1-3) or the official "
              "dip-sisr bicubic F.interpolate",
