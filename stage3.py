@@ -151,8 +151,9 @@ def cli_command(job, cfg, img_path, attempt, tracker):
         "experiment": EXPERIMENT, "stage": "stage3", "run_key": job["key"], "attempt": attempt,
         "protocol": job["protocol"], "protocol_note": cfg["protocol_note"], "dataset": "Set5",
         "scale": cfg["factor"], "fidelity_loss": job["loss"],
-        "observation_operator": ("PIL Lanczos (a=3) downsampling of the HR image" if job["lr_method"] == "pil-lanczos"
-                                 else "bicubic F.interpolate (official dip-sisr)"),
+        "observation_operator": {"pil-lanczos": "PIL Lanczos (a=3) downsampling of the HR image",
+                                 "bicubic": "bicubic F.interpolate without antialiasing (official dip-sisr)",
+                                 "bicubic-aa": "bicubic F.interpolate with antialiasing"}[job["lr_method"]],
         "forward_operator": (f"{job.get('kernel', 'lanczos2')} for l1" if job["loss"] == "l1" else "lanczos2+lanczos3 (l1-em / m-l1)"),
         "reg_weight_provenance": WEIGHT_PROVENANCE[job["reg"]],
     }
@@ -165,10 +166,14 @@ def cli_command(job, cfg, img_path, attempt, tracker):
            "--log-freq", str(cfg["log_freq"]), "--device", cfg.get("device", "auto"),
            "--output-dir", str(out), "--wandb", "--wandb-entity", tracker.entity or "",
            "--wandb-project", tracker.project,
-           "--wandb-run-name", f"{cfg.get('name_prefix', 's3')}_{job['image']}_{job['loss']}_{job['reg']}_seed{job['seed']}",
+           "--wandb-run-name", f"{cfg.get('name_prefix', 's3')}_{job['image']}_{job['loss']}_{job['reg']}_seed{job['seed']}"
+                              + ("" if job["lr_method"] == "pil-lanczos" else f"_{job['lr_method']}")
+                              + ("" if job.get("kernel", "lanczos2") == "lanczos2" else f"_{job['kernel']}")
+                              + ("" if job["protocol"] == "adapted" else f"_{job['protocol']}"),
            "--wandb-group", f"stage3-{job['protocol']}-{job['lr_method']}" + ("" if job.get("kernel", "lanczos2") == "lanczos2" else f"-{job['kernel']}"), "--wandb-job-type", cfg.get("job_type", EXPERIMENT),
            "--wandb-tags", ",".join(cfg.get("tags", []) + ["stage3", f"loss:{job['loss']}", f"reg:{job['reg']}",
-                                                             f"img:{job['image']}", f"seed:{job['seed']}"]),
+                                                             f"img:{job['image']}", f"seed:{job['seed']}",
+                                                             f"lr:{job['lr_method']}", f"kernel:{job.get('kernel', 'lanczos2')}"]),
            "--extra-config-json", json.dumps(extra)]
     return cmd, out
 
